@@ -5,6 +5,7 @@ package typer
 import (
 	"fmt"
 	"syscall"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 )
@@ -12,16 +13,19 @@ import (
 const (
 	inputKeyboard = 1
 
-	keyeventfKeyUp    = 0x0002
-	keyeventfUnicode  = 0x0004
-	keyeventfScancode = 0x0008
+	keyeventfExtendedKey = 0x0001
+	keyeventfKeyUp       = 0x0002
+	keyeventfUnicode     = 0x0004
 
+	vkBack    = 0x08
 	vkTab     = 0x09
 	vkReturn  = 0x0D
 	vkShift   = 0x10
 	vkControl = 0x11
 	vkMenu    = 0x12
 	vkEscape  = 0x1B
+	vkHome    = 0x24
+	vkDelete  = 0x2E
 
 	mapvkVkToVsc = 0
 )
@@ -129,11 +133,11 @@ func (d *windowsDriver) typeRuneHardware(r rune) (bool, error) {
 
 	inputs := make([]winInput, 0, len(mods)*2+2)
 	for _, m := range mods {
-		inputs = append(inputs, makeVKInput(m, false))
+		inputs = append(inputs, makeVKInput(m, false, false))
 	}
-	inputs = append(inputs, makeVKInput(vk, false), makeVKInput(vk, true))
+	inputs = append(inputs, makeVKInput(vk, false, false), makeVKInput(vk, true, false))
 	for i := len(mods) - 1; i >= 0; i-- {
-		inputs = append(inputs, makeVKInput(mods[i], true))
+		inputs = append(inputs, makeVKInput(mods[i], true, false))
 	}
 	return true, sendWinInputs(inputs)
 }
@@ -141,22 +145,54 @@ func (d *windowsDriver) typeRuneHardware(r rune) (bool, error) {
 func (d *windowsDriver) PressEnter(shift bool) error {
 	if shift {
 		return sendWinInputs([]winInput{
-			makeVKInput(vkShift, false),
-			makeVKInput(vkReturn, false),
-			makeVKInput(vkReturn, true),
-			makeVKInput(vkShift, true),
+			makeVKInput(vkShift, false, false),
+			makeVKInput(vkReturn, false, false),
+			makeVKInput(vkReturn, true, false),
+			makeVKInput(vkShift, true, false),
 		})
 	}
 	return sendWinInputs([]winInput{
-		makeVKInput(vkReturn, false),
-		makeVKInput(vkReturn, true),
+		makeVKInput(vkReturn, false, false),
+		makeVKInput(vkReturn, true, false),
 	})
 }
 
 func (d *windowsDriver) PressTab() error {
 	return sendWinInputs([]winInput{
-		makeVKInput(vkTab, false),
-		makeVKInput(vkTab, true),
+		makeVKInput(vkTab, false, false),
+		makeVKInput(vkTab, true, false),
+	})
+}
+
+func (d *windowsDriver) ClearLineIndent(mode InputMode) error {
+	// 1. Insert one sentinel space so the current line always has >= 1 whitespace char before cursor.
+	if err := d.TypeRune(' ', mode); err != nil {
+		return err
+	}
+	time.Sleep(8 * time.Millisecond)
+
+	// 2. Shift + Home (with EXTENDEDKEY so NumLock ON never turns Home into Numpad 7) selects all leading spaces on this line.
+	if err := sendWinInputs([]winInput{
+		makeVKInput(vkShift, false, false),
+		makeVKInput(vkHome, false, true),
+		makeVKInput(vkHome, true, true),
+		makeVKInput(vkShift, true, false),
+	}); err != nil {
+		return err
+	}
+	time.Sleep(8 * time.Millisecond)
+
+	// 3. Backspace deletes only the non-empty whitespace selection on this line, leaving cursor at column 0.
+	return sendWinInputs([]winInput{
+		makeVKInput(vkBack, false, false),
+		makeVKInput(vkBack, true, false),
+	})
+}
+
+func (d *windowsDriver) PressDelete() error {
+	return sendWinInputs([]winInput{
+		makeVKInput(vkDelete, false, true),
+		makeVKInput(vkDelete, true, true),
 	})
 }
 
@@ -165,15 +201,14 @@ func (d *windowsDriver) IsEscapePressed() bool {
 	return (uint16(ret) & 0x8000) != 0
 }
 
-func makeVKInput(vk uint16, keyUp bool) winInput {
+func makeVKInput(vk uint16, keyUp bool, extended bool) winInput {
 	scan, _, _ := procMapVirtualKeyW.Call(uintptr(vk), uintptr(mapvkVkToVsc))
 	var flags uint32
+	if extended {
+		flags |= keyeventfExtendedKey
+	}
 	if keyUp {
 		flags |= keyeventfKeyUp
-	}
-	// Populate both wVk and wScan so applications listening to either virtual keys or scancodes work.
-	if scan != 0 && vk != vkShift && vk != vkControl && vk != vkMenu {
-		_ = keyeventfScancode
 	}
 	return winInput{
 		inputType: inputKeyboard,

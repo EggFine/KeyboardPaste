@@ -34,6 +34,19 @@ const (
 	NewlineSkip       NewlineMode = "skip"
 )
 
+// IndentMode controls how leading indentation on each line is handled when typing code.
+type IndentMode string
+
+const (
+	// IndentKeep types every leading space/tab verbatim (ideal for plain textareas, Notepad, paste-mode terminals).
+	IndentKeep IndentMode = "keep"
+	// IndentResetAuto clears any editor auto-inserted spaces after Enter before typing exact line indentation
+	// (ideal for VS Code, Monaco, CodeMirror, LeetCode, NowCoder, PTA, and Python dedents).
+	IndentResetAuto IndentMode = "reset_auto"
+	// IndentStrip removes leading spaces/tabs from each line and relies solely on the editor's auto-indent.
+	IndentStrip IndentMode = "strip"
+)
+
 // Phase describes the current lifecycle stage of a typing session.
 type Phase string
 
@@ -60,28 +73,43 @@ var (
 
 // Options configures a keyboard simulation run.
 type Options struct {
-	Delay              time.Duration
-	CharInterval       time.Duration
-	RandomJitter       bool
-	Mode               InputMode
-	Newline            NewlineMode
-	StripLeadingIndent bool
-	TabToSpaces        int
-	EnableEscStop      bool
+	Delay                 time.Duration
+	CharInterval          time.Duration
+	RandomJitter          bool
+	Mode                  InputMode
+	Newline               NewlineMode
+	Indent                IndentMode
+	StripLeadingIndent    bool // Kept as shorthand alias if Indent == ""
+	TabToSpaces           int
+	NormalizeCodeSpaces   bool
+	ClearAutoCloseBracket bool
+	EnableEscStop         bool
 }
 
-// DefaultOptions returns sensible defaults for general anti-paste bypass scenarios.
+// DefaultOptions returns defaults tuned for pasting code & text accurately.
 func DefaultOptions() Options {
 	return Options{
-		Delay:              3 * time.Second,
-		CharInterval:       30 * time.Millisecond,
-		RandomJitter:       true,
-		Mode:               ModeUnicode,
-		Newline:            NewlineEnter,
-		StripLeadingIndent: false,
-		TabToSpaces:        0,
-		EnableEscStop:      true,
+		Delay:                 3 * time.Second,
+		CharInterval:          30 * time.Millisecond,
+		RandomJitter:          true,
+		Mode:                  ModeUnicode,
+		Newline:               NewlineEnter,
+		Indent:                IndentKeep,
+		TabToSpaces:           4,
+		NormalizeCodeSpaces:   true,
+		ClearAutoCloseBracket: false,
+		EnableEscStop:         true,
 	}
+}
+
+func (o Options) effectiveIndentMode() IndentMode {
+	if o.Indent != "" {
+		return o.Indent
+	}
+	if o.StripLeadingIndent {
+		return IndentStrip
+	}
+	return IndentKeep
 }
 
 // Progress reports live state back to the UI.
@@ -98,48 +126,95 @@ type Progress struct {
 // Driver abstracts platform-native keyboard injection.
 type Driver interface {
 	// CheckPermission verifies OS-level accessibility/input permissions.
-	// If prompt is true on platforms like macOS, it triggers the system permission dialog.
 	CheckPermission(prompt bool) error
 	// Prepare initializes resources prior to typing a sequence.
 	Prepare(mode InputMode) error
 	// Close releases any OS handles acquired in Prepare.
 	Close() error
-	// TypeRune types a single printable character.
+	// TypeRune types a single printable character (including ASCII space ' ').
 	TypeRune(r rune, mode InputMode) error
 	// PressEnter sends Return (or Shift+Return when shift is true).
 	PressEnter(shift bool) error
 	// PressTab sends the Tab key.
 	PressTab() error
+	// ClearLineIndent clears any auto-indented whitespace before the cursor on the current line
+	// without deleting the preceding newline or text after the cursor.
+	ClearLineIndent(mode InputMode) error
+	// PressDelete sends Forward Delete (to remove an auto-completed closing bracket/quote to the right of the cursor).
+	PressDelete() error
 	// IsEscapePressed checks whether the physical ESC key is currently held down.
 	IsEscapePressed() bool
 }
 
-// PreprocessText normalizes line endings and applies indentation/tab/newline rules.
+// PreprocessText normalizes line endings, cleans web-copied invisible spaces, and applies tab/indentation rules.
 func PreprocessText(text string, opts Options) string {
 	if text == "" {
 		return ""
 	}
+
+	normalized := text
+	if opts.NormalizeCodeSpaces {
+		// Remove UTF-8 BOM and zero-width characters often injected by web pages.
+		normalized = strings.Map(func(r rune) rune {
+			switch r {
+			case '\uFEFF', '\u200B', '\u200C', '\u200D':
+				return -1
+			case '\u00A0': // HTML &nbsp; -> standard ASCII space
+				return ' '
+			default:
+				return r
+			}
+		}, normalized)
+	}
+
 	// Normalize Windows CRLF and classic Mac CR to single LF so Enter isn't pressed twice.
-	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r\n", "\n")
 	normalized = strings.ReplaceAll(normalized, "\r", "\n")
 
-	if opts.StripLeadingIndent {
-		lines := strings.Split(normalized, "\n")
+	lines := strings.Split(normalized, "\n")
+
+	if opts.effectiveIndentMode() == IndentStrip {
 		for i, line := range lines {
 			lines[i] = strings.TrimLeft(line, " \t")
 		}
-		normalized = strings.Join(lines, "\n")
 	}
+
+	if opts.TabToSpaces > 0 {
+		for i, line := range lines {
+			lines[i] = expandTabs(line, opts.TabToSpaces)
+		}
+	}
+
+	normalized = strings.Join(lines, "\n")
 
 	if opts.Newline == NewlineSkip {
 		normalized = strings.ReplaceAll(normalized, "\n", "")
 	}
 
-	if opts.TabToSpaces > 0 {
-		normalized = strings.ReplaceAll(normalized, "\t", strings.Repeat(" ", opts.TabToSpaces))
-	}
-
 	return normalized
+}
+
+// expandTabs expands '\t' characters to spaces aligned to multiples of tabWidth columns.
+func expandTabs(line string, tabWidth int) string {
+	if tabWidth <= 0 || !strings.ContainsRune(line, '\t') {
+		return line
+	}
+	var b strings.Builder
+	b.Grow(len(line) + 8)
+	col := 0
+	for _, r := range line {
+		if r == '\t' {
+			spaces := tabWidth - (col % tabWidth)
+			for range spaces {
+				b.WriteByte(' ')
+			}
+			col += spaces
+		} else {
+			b.WriteRune(r)
+			col++
+		}
+	}
+	return b.String()
 }
 
 // Engine coordinates countdown, pause/resume, ESC emergency stop, and character dispatch.
@@ -210,7 +285,6 @@ func (e *Engine) Stop() {
 }
 
 // Run executes a full countdown + keyboard simulation session synchronously.
-// Callers in a GUI typically invoke Run inside a goroutine.
 func (e *Engine) Run(parentCtx context.Context, rawText string, opts Options, onProgress func(Progress)) error {
 	processed := PreprocessText(rawText, opts)
 	totalRunes := utf8.RuneCountInString(processed)
@@ -270,6 +344,7 @@ func (e *Engine) Run(parentCtx context.Context, rawText string, opts Options, on
 		for {
 			select {
 			case <-ctx.Done():
+				ticker.Stop()
 				emit(Progress{Phase: PhaseStopped, TotalRunes: totalRunes, Err: ErrStopped})
 				return ErrStopped
 			case <-ticker.C:
@@ -279,7 +354,6 @@ func (e *Engine) Run(parentCtx context.Context, rawText string, opts Options, on
 					return ErrStoppedByEsc
 				}
 				if e.IsPaused() {
-					// Extend deadline while paused during countdown
 					deadline = deadline.Add(50 * time.Millisecond)
 					emit(Progress{
 						Phase:          PhasePaused,
@@ -304,6 +378,8 @@ func (e *Engine) Run(parentCtx context.Context, rawText string, opts Options, on
 
 startTyping:
 	runes := []rune(processed)
+	indentMode := opts.effectiveIndentMode()
+
 	emit(Progress{
 		Phase:      PhaseTyping,
 		TypedRunes: 0,
@@ -311,21 +387,33 @@ startTyping:
 	})
 
 	for idx, r := range runes {
-		// Check cancellation / pause / ESC before each character
 		if err := e.waitIfPausedOrAborted(ctx, opts, idx, totalRunes, emit); err != nil {
 			return err
 		}
 
-		// Dispatch keystroke
 		var err error
 		switch r {
 		case '\n':
 			err = e.driver.PressEnter(opts.Newline == NewlineShiftEnter)
+			if err == nil && indentMode == IndentResetAuto {
+				// Let the target code editor complete its Enter auto-indent before clearing line indent.
+				if sleepErr := e.sleepInterruptible(ctx, 15*time.Millisecond, opts.EnableEscStop, idx+1, totalRunes, emit); sleepErr != nil {
+					return sleepErr
+				}
+				err = e.driver.ClearLineIndent(opts.Mode)
+			}
 		case '\t':
 			err = e.driver.PressTab()
 		default:
 			err = e.driver.TypeRune(r, opts.Mode)
+			if err == nil && opts.ClearAutoCloseBracket && isAutoClosableOpener(r) {
+				if sleepErr := e.sleepInterruptible(ctx, 12*time.Millisecond, opts.EnableEscStop, idx+1, totalRunes, emit); sleepErr != nil {
+					return sleepErr
+				}
+				err = e.driver.PressDelete()
+			}
 		}
+
 		if err != nil {
 			emit(Progress{
 				Phase:       PhaseError,
@@ -345,7 +433,6 @@ startTyping:
 			CurrentRune: r,
 		})
 
-		// Wait interval before next character (skip trailing delay after last rune)
 		if typed < totalRunes {
 			interval := computeCharInterval(r, opts)
 			if err := e.sleepInterruptible(ctx, interval, opts.EnableEscStop, typed, totalRunes, emit); err != nil {
@@ -360,6 +447,15 @@ startTyping:
 		TotalRunes: totalRunes,
 	})
 	return nil
+}
+
+func isAutoClosableOpener(r rune) bool {
+	switch r {
+	case '{', '[', '(', '"', '\'':
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *Engine) waitIfPausedOrAborted(
@@ -444,20 +540,26 @@ func (e *Engine) sleepInterruptible(
 func computeCharInterval(r rune, opts Options) time.Duration {
 	base := opts.CharInterval
 	if base <= 0 {
+		if r == '\n' {
+			return 15 * time.Millisecond
+		}
 		return 0
 	}
-	if !opts.RandomJitter {
-		return base
+	d := base
+	if opts.RandomJitter {
+		factor := 0.65 + rand.Float64()*0.80
+		switch r {
+		case '\n', '.', ',', ';', '!', '?', '。', '，', '；', '！', '？':
+			factor += 0.35
+		}
+		d = time.Duration(float64(base) * factor)
+		if d < time.Millisecond {
+			d = time.Millisecond
+		}
 	}
-	// Humanized typing rhythm: 0.65x ~ 1.45x jitter, with slight natural pause on punctuation/newline.
-	factor := 0.65 + rand.Float64()*0.80
-	switch r {
-	case '\n', '.', ',', ';', '!', '?', '。', '，', '；', '！', '？':
-		factor += 0.35
-	}
-	d := time.Duration(float64(base) * factor)
-	if d < time.Millisecond {
-		d = time.Millisecond
+	// Ensure target editor finishes processing Enter before typing next line's leading spaces.
+	if r == '\n' && d < 15*time.Millisecond {
+		d = 15 * time.Millisecond
 	}
 	return d
 }

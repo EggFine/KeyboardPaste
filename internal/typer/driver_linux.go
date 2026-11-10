@@ -165,6 +165,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 type linuxDriver struct {
@@ -191,7 +192,6 @@ func (d *linuxDriver) Prepare(_ InputMode) error {
 		d.x11 = nil
 	}
 
-	// Prefer native X11/XTest when DISPLAY is available (works for X11 and XWayland apps).
 	if os.Getenv("DISPLAY") != "" {
 		ctx := C.kp_x11_open()
 		if ctx != nil {
@@ -200,7 +200,6 @@ func (d *linuxDriver) Prepare(_ InputMode) error {
 		}
 	}
 
-	// Fallback to wtype under pure Wayland sessions.
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
 		if path, err := exec.LookPath("wtype"); err == nil {
 			d.wtypeBin = path
@@ -208,7 +207,6 @@ func (d *linuxDriver) Prepare(_ InputMode) error {
 		}
 	}
 
-	// Final attempt to open default X11 display even if DISPLAY env was non-standard.
 	if ctx := C.kp_x11_open(); ctx != nil {
 		d.x11 = ctx
 		return nil
@@ -231,7 +229,10 @@ func (d *linuxDriver) Close() error {
 func (d *linuxDriver) TypeRune(r rune, mode InputMode) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.typeRuneLocked(r, mode)
+}
 
+func (d *linuxDriver) typeRuneLocked(r rune, mode InputMode) error {
 	if d.x11 != nil {
 		sym := runeToX11KeySym(r)
 		preferExisting := C.int(1)
@@ -245,7 +246,15 @@ func (d *linuxDriver) TypeRune(r rune, mode InputMode) error {
 	}
 
 	if d.wtypeBin != "" {
-		cmd := exec.Command(d.wtypeBin, "--", string(r))
+		var cmd *exec.Cmd
+		switch r {
+		case ' ':
+			cmd = exec.Command(d.wtypeBin, "-k", "space")
+		case '-':
+			cmd = exec.Command(d.wtypeBin, "-k", "minus")
+		default:
+			cmd = exec.Command(d.wtypeBin, "--", string(r))
+		}
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("wtype 发送字符 %q 失败: %w", r, err)
 		}
@@ -305,6 +314,61 @@ func (d *linuxDriver) PressTab() error {
 	return errors.New("Linux 键盘驱动尚未初始化")
 }
 
+func (d *linuxDriver) ClearLineIndent(mode InputMode) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err := d.typeRuneLocked(' ', mode); err != nil {
+		return err
+	}
+	time.Sleep(8 * time.Millisecond)
+
+	if d.x11 != nil {
+		if C.kp_x11_tap_keysym(d.x11, C.XK_Home, 1, 1) != 0 {
+			return errors.New("X11 XTest 选择行首缩进失败")
+		}
+		time.Sleep(8 * time.Millisecond)
+		if C.kp_x11_tap_keysym(d.x11, C.XK_BackSpace, 0, 1) != 0 {
+			return errors.New("X11 XTest 清除行首缩进失败")
+		}
+		return nil
+	}
+
+	if d.wtypeBin != "" {
+		if err := exec.Command(d.wtypeBin, "-M", "shift", "-k", "Home", "-m", "shift").Run(); err != nil {
+			return fmt.Errorf("wtype 选择行首缩进失败: %w", err)
+		}
+		time.Sleep(8 * time.Millisecond)
+		if err := exec.Command(d.wtypeBin, "-k", "BackSpace").Run(); err != nil {
+			return fmt.Errorf("wtype 清除行首缩进失败: %w", err)
+		}
+		return nil
+	}
+
+	return errors.New("Linux 键盘驱动尚未初始化")
+}
+
+func (d *linuxDriver) PressDelete() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.x11 != nil {
+		if C.kp_x11_tap_keysym(d.x11, C.XK_Delete, 0, 1) != 0 {
+			return errors.New("X11 XTest 发送 Delete 键失败")
+		}
+		return nil
+	}
+
+	if d.wtypeBin != "" {
+		if err := exec.Command(d.wtypeBin, "-k", "Delete").Run(); err != nil {
+			return fmt.Errorf("wtype 发送 Delete 键失败: %w", err)
+		}
+		return nil
+	}
+
+	return errors.New("Linux 键盘驱动尚未初始化")
+}
+
 func (d *linuxDriver) IsEscapePressed() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -315,11 +379,9 @@ func (d *linuxDriver) IsEscapePressed() bool {
 }
 
 func runeToX11KeySym(r rune) C.KeySym {
-	// Latin-1 printable characters map 1:1 in X11 keysymdef.h.
 	if (r >= 0x20 && r <= 0x7E) || (r >= 0xA0 && r <= 0xFF) {
 		return C.KeySym(r)
 	}
-	// Xorg standard Unicode KeySym encoding for U+0100 .. U+10FFFF.
 	if r >= 0x0100 {
 		return C.KeySym(0x01000000 | uint32(r))
 	}

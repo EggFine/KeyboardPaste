@@ -29,6 +29,15 @@ const (
 	newlineLabelEnter      = "回车发送 Enter（默认）"
 	newlineLabelShiftEnter = "回车发送 Shift+Enter（聊天换行不发送）"
 	newlineLabelSkip       = "忽略所有换行符"
+
+	tabLabel4Spaces = "Tab 转 4 个空格（默认推荐）"
+	tabLabel2Spaces = "Tab 转 2 个空格"
+	tabLabel8Spaces = "Tab 转 8 个空格"
+	tabLabelKeepTab = "保留原 Tab 按键"
+
+	indentLabelKeep      = "原样输入空格缩进（普通输入框 / 记事本）"
+	indentLabelResetAuto = "清除自动缩进后重打（推荐：在线OJ / IDE）"
+	indentLabelStrip     = "去除每行前导缩进（仅靠编辑器缩进）"
 )
 
 // Run initializes and runs the KeyboardPaste Fyne desktop application in portable stateless mode.
@@ -41,7 +50,7 @@ func Run(version string) {
 		title = fmt.Sprintf("KeyboardPaste %s - 模拟键盘输入工具", version)
 	}
 	win := fyneApp.NewWindow(title)
-	win.Resize(fyne.NewSize(680, 620))
+	win.Resize(fyne.NewSize(720, 660))
 
 	engine := typer.NewEngine(nil)
 	ui := buildMainUI(fyneApp, win, engine)
@@ -66,10 +75,11 @@ type appUI struct {
 func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI {
 	defaults := typer.DefaultOptions()
 
-	// --- Text Editor & Top Bar ---
+	// --- Monospace Code/Text Editor & Top Bar ---
 	editor := widget.NewMultiLineEntry()
 	editor.Wrapping = fyne.TextWrapBreak
-	editor.SetPlaceHolder("在此粘贴或输入需要模拟键盘打字的文本...\n\n使用步骤：\n1. 将文本粘贴到此输入框\n2. 设置启动延迟与单字间隔，点击下方「开始模拟输入」\n3. 在倒计时结束前，鼠标点击目标窗口的输入框即可自动打字")
+	editor.TextStyle = fyne.TextStyle{Monospace: true}
+	editor.SetPlaceHolder("在此粘贴需要模拟键盘输入的代码或文本...\n\n代码粘贴小贴士：\n• 默认自动将 Tab 缩进对齐转换为 4 个空格，并净化网页复制的特殊空白符 (&nbsp;)\n• 若目标是在线 OJ / VS Code 等会自动缩进的代码编辑器，建议将下方「行首缩进」切换为「清除自动缩进后重打」，完美还原多级缩进与 Python 退格缩进")
 
 	statsLabel := widget.NewLabel("0 字符 · 0 行 · 预计 ~0.0s")
 
@@ -81,10 +91,11 @@ func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI
 
 	updateStats := func() {
 		text := editor.Text
-		runeCount := utf8.RuneCountInString(strings.ReplaceAll(text, "\r\n", "\n"))
+		normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+		runeCount := utf8.RuneCountInString(normalized)
 		lineCount := 0
 		if runeCount > 0 {
-			lineCount = strings.Count(text, "\n") + 1
+			lineCount = strings.Count(normalized, "\n") + 1
 		}
 		intervalMs := parseIntervalMs(intervalEntry.Text, 30)
 		estSec := float64(runeCount*intervalMs) / 1000.0
@@ -179,16 +190,26 @@ func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI
 
 	timingGrid := container.NewGridWithColumns(2, delayRow, intervalRow)
 
-	// --- Mode & Newline Selectors ---
+	// --- Mode, Newline, Tab & Indentation Selectors ---
 	modeSelect := widget.NewSelect([]string{modeLabelUnicode, modeLabelHardware}, nil)
 	modeSelect.SetSelected(modeLabelUnicode)
 
 	newlineSelect := widget.NewSelect([]string{newlineLabelEnter, newlineLabelShiftEnter, newlineLabelSkip}, nil)
 	newlineSelect.SetSelected(newlineLabelEnter)
 
-	selectGrid := container.NewGridWithColumns(2,
+	tabSelect := widget.NewSelect([]string{tabLabel4Spaces, tabLabel2Spaces, tabLabel8Spaces, tabLabelKeepTab}, nil)
+	tabSelect.SetSelected(tabLabel4Spaces)
+
+	indentSelect := widget.NewSelect([]string{indentLabelKeep, indentLabelResetAuto, indentLabelStrip}, nil)
+	indentSelect.SetSelected(indentLabelKeep)
+
+	selectGrid1 := container.NewGridWithColumns(2,
 		container.NewBorder(nil, nil, widget.NewLabel("输入模式:"), nil, modeSelect),
 		container.NewBorder(nil, nil, widget.NewLabel("换行策略:"), nil, newlineSelect),
+	)
+	selectGrid2 := container.NewGridWithColumns(2,
+		container.NewBorder(nil, nil, widget.NewLabel("Tab 转换:"), nil, tabSelect),
+		container.NewBorder(nil, nil, widget.NewLabel("行首缩进:"), nil, indentSelect),
 	)
 
 	// --- Checkboxes ---
@@ -198,17 +219,17 @@ func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI
 	escStopCheck := widget.NewCheck("按 ESC 键随时紧急停止", nil)
 	escStopCheck.SetChecked(defaults.EnableEscStop)
 
-	stripIndentCheck := widget.NewCheck("去除每行行首缩进（防代码编辑器双重缩进）", nil)
-	stripIndentCheck.SetChecked(defaults.StripLeadingIndent)
+	cleanSpaceCheck := widget.NewCheck("净化网页特殊空白（&nbsp; 转标准空格）", nil)
+	cleanSpaceCheck.SetChecked(defaults.NormalizeCodeSpaces)
 
-	tabSpacesCheck := widget.NewCheck("将 Tab 转为 4 个空格", nil)
-	tabSpacesCheck.SetChecked(defaults.TabToSpaces > 0)
+	autoBracketCheck := widget.NewCheck("消除编辑器自动补全右括号/引号", nil)
+	autoBracketCheck.SetChecked(defaults.ClearAutoCloseBracket)
 
 	checksGrid := container.NewGridWithColumns(2,
 		jitterCheck,
 		escStopCheck,
-		stripIndentCheck,
-		tabSpacesCheck,
+		cleanSpaceCheck,
+		autoBracketCheck,
 	)
 
 	// --- Progress & Status ---
@@ -239,10 +260,12 @@ func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI
 			intervalPlusBtn.Disable()
 			modeSelect.Disable()
 			newlineSelect.Disable()
+			tabSelect.Disable()
+			indentSelect.Disable()
 			jitterCheck.Disable()
 			escStopCheck.Disable()
-			stripIndentCheck.Disable()
-			tabSpacesCheck.Disable()
+			cleanSpaceCheck.Disable()
+			autoBracketCheck.Disable()
 		} else {
 			startBtn.Enable()
 			pauseBtn.SetText("暂停")
@@ -261,17 +284,19 @@ func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI
 			intervalPlusBtn.Enable()
 			modeSelect.Enable()
 			newlineSelect.Enable()
+			tabSelect.Enable()
+			indentSelect.Enable()
 			jitterCheck.Enable()
 			escStopCheck.Enable()
-			stripIndentCheck.Enable()
-			tabSpacesCheck.Enable()
+			cleanSpaceCheck.Enable()
+			autoBracketCheck.Enable()
 		}
 	}
 
 	startBtn = widget.NewButtonWithIcon("开始模拟输入", theme.MediaPlayIcon(), func() {
 		rawText := editor.Text
-		if strings.TrimSpace(rawText) == "" && rawText == "" {
-			dialog.ShowInformation("提示", "请先粘贴或输入需要模拟打字的文本内容。", win)
+		if rawText == "" {
+			dialog.ShowInformation("提示", "请先粘贴或输入需要模拟打字的代码或文本内容。", win)
 			return
 		}
 
@@ -279,16 +304,16 @@ func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI
 		intervalMs := parseIntervalMs(intervalEntry.Text, 30)
 
 		opts := typer.Options{
-			Delay:              time.Duration(delaySec * float64(time.Second)),
-			CharInterval:       time.Duration(intervalMs) * time.Millisecond,
-			RandomJitter:       jitterCheck.Checked,
-			Mode:               selectedInputMode(modeSelect.Selected),
-			Newline:            selectedNewlineMode(newlineSelect.Selected),
-			StripLeadingIndent: stripIndentCheck.Checked,
-			EnableEscStop:      escStopCheck.Checked,
-		}
-		if tabSpacesCheck.Checked {
-			opts.TabToSpaces = 4
+			Delay:                 time.Duration(delaySec * float64(time.Second)),
+			CharInterval:          time.Duration(intervalMs) * time.Millisecond,
+			RandomJitter:          jitterCheck.Checked,
+			Mode:                  selectedInputMode(modeSelect.Selected),
+			Newline:               selectedNewlineMode(newlineSelect.Selected),
+			Indent:                selectedIndentMode(indentSelect.Selected),
+			TabToSpaces:           selectedTabSpaces(tabSelect.Selected),
+			NormalizeCodeSpaces:   cleanSpaceCheck.Checked,
+			ClearAutoCloseBracket: autoBracketCheck.Checked,
+			EnableEscStop:         escStopCheck.Checked,
 		}
 
 		if utf8.RuneCountInString(typer.PreprocessText(rawText, opts)) == 0 {
@@ -377,7 +402,8 @@ func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI
 	bottomPanel := container.NewVBox(
 		widget.NewSeparator(),
 		timingGrid,
-		selectGrid,
+		selectGrid1,
+		selectGrid2,
 		checksGrid,
 		progressBar,
 		statusLabel,
@@ -401,9 +427,9 @@ func buildPlatformHint() string {
 	case "darwin":
 		return "💡 就绪：首次使用需在「系统设置 -> 隐私与安全性 -> 辅助功能」中授权允许控制电脑。"
 	case "windows":
-		return "💡 就绪：粘贴文本后点击开始；若目标程序以管理员权限运行，请右键「以管理员身份运行」本工具。"
+		return "💡 就绪：粘贴代码后点击开始；若目标程序以管理员权限运行，请右键「以管理员身份运行」本工具。"
 	default:
-		return "💡 就绪：粘贴文本后点击「开始模拟输入」，在倒计时结束前点击目标输入框即可。"
+		return "💡 就绪：粘贴代码后点击「开始模拟输入」，在倒计时结束前点击目标输入框即可。"
 	}
 }
 
@@ -457,5 +483,29 @@ func selectedNewlineMode(label string) typer.NewlineMode {
 		return typer.NewlineSkip
 	default:
 		return typer.NewlineEnter
+	}
+}
+
+func selectedTabSpaces(label string) int {
+	switch label {
+	case tabLabel2Spaces:
+		return 2
+	case tabLabel8Spaces:
+		return 8
+	case tabLabelKeepTab:
+		return 0
+	default:
+		return 4
+	}
+}
+
+func selectedIndentMode(label string) typer.IndentMode {
+	switch label {
+	case indentLabelResetAuto:
+		return typer.IndentResetAuto
+	case indentLabelStrip:
+		return typer.IndentStrip
+	default:
+		return typer.IndentKeep
 	}
 }

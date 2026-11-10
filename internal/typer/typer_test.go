@@ -62,36 +62,190 @@ func (m *mockDriver) PressTab() error {
 	return nil
 }
 
+func (m *mockDriver) ClearLineIndent(_ InputMode) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, "key:ClearLineIndent")
+	return nil
+}
+
+func (m *mockDriver) PressDelete() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, "key:Delete")
+	return nil
+}
+
 func (m *mockDriver) IsEscapePressed() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.escAfter > 0 && m.typedCount >= m.escAfter
 }
 
-func TestPreprocessText(t *testing.T) {
-	raw := "func main() {\r\n\tfmt.Println(\"你好\")\r    return\n}"
+// smartEditorSim simulates an online IDE / Monaco / CodeMirror editor with auto-indent and auto-closing brackets!
+type smartEditorSim struct {
+	lines     []string
+	row       int
+	col       int
+	autoClose bool
+}
 
-	gotDefault := PreprocessText(raw, DefaultOptions())
-	wantDefault := "func main() {\n\tfmt.Println(\"你好\")\n    return\n}"
-	if gotDefault != wantDefault {
-		t.Fatalf("PreprocessText default = %q, want %q", gotDefault, wantDefault)
+func newSmartEditorSim(autoClose bool) *smartEditorSim {
+	return &smartEditorSim{lines: []string{""}, autoClose: autoClose}
+}
+
+func (s *smartEditorSim) CheckPermission(_ bool) error { return nil }
+func (s *smartEditorSim) Prepare(_ InputMode) error    { return nil }
+func (s *smartEditorSim) Close() error                 { return nil }
+func (s *smartEditorSim) IsEscapePressed() bool        { return false }
+
+func (s *smartEditorSim) TypeRune(r rune, _ InputMode) error {
+	line := []rune(s.lines[s.row])
+	before := string(line[:s.col])
+	after := string(line[s.col:])
+
+	inserted := string(r)
+	if s.autoClose {
+		switch r {
+		case '{':
+			inserted = "{}"
+		case '(':
+			inserted = "()"
+		case '[':
+			inserted = "[]"
+		case '"':
+			inserted = `""`
+		case '\'':
+			inserted = `''`
+		}
+	}
+	s.lines[s.row] = before + inserted + after
+	s.col++
+	return nil
+}
+
+func (s *smartEditorSim) PressEnter(_ bool) error {
+	line := []rune(s.lines[s.row])
+	before := string(line[:s.col])
+	after := string(line[s.col:])
+
+	// Compute auto-indent like VS Code / Monaco: copy current leading spaces + 4 extra spaces if line ends with ':' or '{'.
+	indent := 0
+	for _, ch := range before {
+		if ch == ' ' {
+			indent++
+		} else {
+			break
+		}
+	}
+	trimmed := strings.TrimRight(before, " ")
+	if strings.HasSuffix(trimmed, ":") || strings.HasSuffix(trimmed, "{") {
+		indent += 4
 	}
 
-	optsCode := DefaultOptions()
-	optsCode.StripLeadingIndent = true
-	optsCode.TabToSpaces = 4
-	gotCode := PreprocessText(raw, optsCode)
-	wantCode := "func main() {\nfmt.Println(\"你好\")\nreturn\n}"
-	if gotCode != wantCode {
-		t.Fatalf("PreprocessText strip indent = %q, want %q", gotCode, wantCode)
+	s.lines[s.row] = before
+	newLine := strings.Repeat(" ", indent) + after
+	s.lines = append(s.lines[:s.row+1], append([]string{newLine}, s.lines[s.row+1:]...)...)
+	s.row++
+	s.col = indent
+	return nil
+}
+
+func (s *smartEditorSim) PressTab() error {
+	return s.TypeRune('\t', ModeUnicode)
+}
+
+func (s *smartEditorSim) ClearLineIndent(_ InputMode) error {
+	// Simulates sentinel space + Shift+Home + Backspace clearing everything before cursor on current line.
+	line := []rune(s.lines[s.row])
+	s.lines[s.row] = string(line[s.col:])
+	s.col = 0
+	return nil
+}
+
+func (s *smartEditorSim) PressDelete() error {
+	line := []rune(s.lines[s.row])
+	if s.col < len(line) {
+		s.lines[s.row] = string(line[:s.col]) + string(line[s.col+1:])
+	}
+	return nil
+}
+
+func (s *smartEditorSim) Text() string {
+	return strings.Join(s.lines, "\n")
+}
+
+func TestPreprocessCodeSpacesTabsAndNewlines(t *testing.T) {
+	// Contains UTF-8 BOM, HTML &nbsp; (\u00A0), zero-width space (\u200B), CRLF, CR, LF, Tabs, mixed spaces+Tab, blank lines.
+	raw := "\uFEFFpackage main\r\n\r\nfunc add(a, b int) int {\r\t\u00A0\u200Breturn a + b\n  \t// aligned comment\n}"
+
+	got := PreprocessText(raw, DefaultOptions())
+	want := "package main\n\nfunc add(a, b int) int {\n     return a + b\n    // aligned comment\n}"
+	if got != want {
+		t.Fatalf("PreprocessText default =\n%q\nwant:\n%q", got, want)
 	}
 
-	optsTab := DefaultOptions()
-	optsTab.TabToSpaces = 2
-	optsTab.Newline = NewlineSkip
-	gotTab := PreprocessText("a\tb\r\nc", optsTab)
-	if gotTab != "a  bc" {
-		t.Fatalf("PreprocessText tab+skip = %q, want %q", gotTab, "a  bc")
+	// Keep raw Tab when TabToSpaces == 0
+	optsKeepTab := DefaultOptions()
+	optsKeepTab.TabToSpaces = 0
+	gotKeepTab := PreprocessText("if true {\r\n\treturn\r\n}", optsKeepTab)
+	wantKeepTab := "if true {\n\treturn\n}"
+	if gotKeepTab != wantKeepTab {
+		t.Fatalf("PreprocessText keep tab = %q, want %q", gotKeepTab, wantKeepTab)
+	}
+
+	// Strip leading indent
+	optsStrip := DefaultOptions()
+	optsStrip.Indent = IndentStrip
+	gotStrip := PreprocessText("def f():\n    \treturn 1", optsStrip)
+	wantStrip := "def f():\nreturn 1"
+	if gotStrip != wantStrip {
+		t.Fatalf("PreprocessText strip = %q, want %q", gotStrip, wantStrip)
+	}
+}
+
+func TestSmartEditorPythonAndCIndentationExactMatch(t *testing.T) {
+	pythonCode := strings.Join([]string{
+		"def solve(nums):",
+		"\tif not nums:",
+		"\t\treturn 0",
+		"\ttotal = 0",
+		"\tfor x in nums:",
+		"\t\tif x > 0:",
+		"\t\t\ttotal += x",
+		"\treturn total",
+		"",
+		"print(solve([1, -2, 3]))",
+	}, "\r\n")
+
+	expectedPython := strings.ReplaceAll(strings.ReplaceAll(pythonCode, "\r\n", "\n"), "\t", "    ")
+
+	sim := newSmartEditorSim(true)
+	eng := NewEngine(sim)
+
+	opts := DefaultOptions()
+	opts.Delay = 0
+	opts.CharInterval = 0
+	opts.RandomJitter = false
+	opts.TabToSpaces = 4
+	opts.Indent = IndentResetAuto
+	opts.ClearAutoCloseBracket = true
+
+	if err := eng.Run(context.Background(), pythonCode, opts, nil); err != nil {
+		t.Fatalf("Engine.Run python failed: %v", err)
+	}
+	if sim.Text() != expectedPython {
+		t.Fatalf("Python code mismatch in smart editor!\ngot:\n%s\nwant:\n%s", sim.Text(), expectedPython)
+	}
+
+	cCode := "int main() {\n    if (a == 1) {\n        printf(\"hello world\\n\");\n    }\n    return 0;\n}"
+	simC := newSmartEditorSim(true)
+	engC := NewEngine(simC)
+	if err := engC.Run(context.Background(), cCode, opts, nil); err != nil {
+		t.Fatalf("Engine.Run C failed: %v", err)
+	}
+	if simC.Text() != cCode {
+		t.Fatalf("C code mismatch in smart editor!\ngot:\n%s\nwant:\n%s", simC.Text(), cCode)
 	}
 }
 
@@ -100,13 +254,14 @@ func TestEngineRunUnicodeAndSpecialKeys(t *testing.T) {
 	eng := NewEngine(drv)
 
 	opts := DefaultOptions()
-	opts.Delay = 60 * time.Millisecond
-	opts.CharInterval = 2 * time.Millisecond
+	opts.Delay = 40 * time.Millisecond
+	opts.CharInterval = time.Millisecond
 	opts.RandomJitter = false
+	opts.TabToSpaces = 0
 	opts.Newline = NewlineShiftEnter
 
 	var phases []Phase
-	err := eng.Run(context.Background(), "A你\r\n\t!", opts, func(p Progress) {
+	err := eng.Run(context.Background(), "A \r\n\t!", opts, func(p Progress) {
 		phases = append(phases, p.Phase)
 	})
 	if err != nil {
@@ -115,7 +270,7 @@ func TestEngineRunUnicodeAndSpecialKeys(t *testing.T) {
 
 	wantEvents := []string{
 		"unicode:A",
-		"unicode:你",
+		"unicode: ",
 		"key:Shift+Enter",
 		"key:Tab",
 		"unicode:!",
