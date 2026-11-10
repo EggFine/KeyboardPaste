@@ -1,0 +1,22 @@
+# Binaries and build artifacts
+/KeyboardPaste
+/keyboardpaste
+*.exe
+*.dll
+*.so
+*.dylib
+*.app/
+/dist/
+/build/
+/out/
+
+# Go test & coverage
+*.test
+*.out
+coverage.txt
+
+# IDE / OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

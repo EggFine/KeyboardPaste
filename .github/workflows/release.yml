@@ -1,0 +1,245 @@
+name: Release All Platforms
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布的版本号标签（例如 v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Determine release version
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-linux:
+    name: Build Linux (${{ matrix.goarch }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            runner: ubuntu-latest
+          - goarch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux GUI & X11/Wayland dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc pkg-config libgl1-mesa-dev xorg-dev libxtst-dev libwayland-dev libxkbcommon-dev
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: true
+
+      - name: Run unit tests
+        run: go test -v ./internal/typer
+
+      - name: Build Linux (${{ matrix.goarch }}) binary
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p out
+          CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" \
+            go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+            -o "out/KeyboardPaste_${VERSION}_linux_${GOARCH}" .
+          cp "out/KeyboardPaste_${VERSION}_linux_${GOARCH}" out/KeyboardPaste
+          tar -C out -czvf "out/KeyboardPaste_${VERSION}_linux_${GOARCH}.tar.gz" KeyboardPaste
+          rm -f out/KeyboardPaste
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.goarch }}
+          path: out/KeyboardPaste_*_linux_${{ matrix.goarch }}*
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows (amd64)
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure MinGW GCC is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
+            choco install mingw -y --no-progress
+          }
+          gcc --version
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: true
+
+      - name: Run unit tests
+        shell: pwsh
+        run: |
+          go test -v ./internal/typer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Windows GUI single-file executable
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $env:CGO_ENABLED = "1"
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          New-Item -ItemType Directory -Force -Path dist, out | Out-Null
+          go build -trimpath -ldflags="-s -w -H=windowsgui -X main.version=$env:VERSION" -o dist/KeyboardPaste.exe .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item dist/KeyboardPaste.exe "out/KeyboardPaste_${env:VERSION}_windows_amd64.exe"
+          Compress-Archive -Path dist/KeyboardPaste.exe -DestinationPath "out/KeyboardPaste_${env:VERSION}_windows_amd64.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-amd64
+          path: out/KeyboardPaste_*_windows_amd64.*
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS (arm64, amd64 & universal)
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: true
+
+      - name: Run unit tests
+        run: go test -v ./internal/typer
+
+      - name: Build & Package macOS .app bundles
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p build
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+            go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+            -o build/KeyboardPaste-arm64 .
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+            -o build/KeyboardPaste-amd64 .
+          lipo -create -output build/KeyboardPaste-universal \
+            build/KeyboardPaste-arm64 build/KeyboardPaste-amd64
+
+          package_mac_app() {
+            local bin_src="$1"
+            local arch_name="$2"
+            local stage_dir="stage_${arch_name}"
+            local app_dir="${stage_dir}/KeyboardPaste.app/Contents"
+            local clean_ver="${VERSION#v}"
+
+            mkdir -p "${app_dir}/MacOS" "${app_dir}/Resources"
+            cp "${bin_src}" "${app_dir}/MacOS/KeyboardPaste"
+            chmod +x "${app_dir}/MacOS/KeyboardPaste"
+
+            cat > "${app_dir}/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>
+            <string>KeyboardPaste</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.eggfine.keyboardpaste</string>
+            <key>CFBundleName</key>
+            <string>KeyboardPaste</string>
+            <key>CFBundleDisplayName</key>
+            <string>KeyboardPaste</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${clean_ver}</string>
+            <key>CFBundleVersion</key>
+            <string>${clean_ver}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+            codesign --force --deep --sign - "${stage_dir}/KeyboardPaste.app"
+            ditto -c -k --keepParent "${stage_dir}/KeyboardPaste.app" "KeyboardPaste_${VERSION}_darwin_${arch_name}.zip"
+          }
+
+          package_mac_app build/KeyboardPaste-arm64 arm64
+          package_mac_app build/KeyboardPaste-amd64 amd64
+          package_mac_app build/KeyboardPaste-universal universal
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: KeyboardPaste_*_darwin_*.zip
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - prepare
+      - build-linux
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all compiled artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        working-directory: release-assets
+        run: |
+          ls -lh
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create and upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.version }}
+          name: KeyboardPaste ${{ needs.prepare.outputs.version }}
+          generate_release_notes: true
+          files: release-assets/*

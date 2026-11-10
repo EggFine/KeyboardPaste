@@ -1,0 +1,204 @@
+//go:build windows
+
+package typer
+
+import (
+	"fmt"
+	"syscall"
+	"unicode/utf16"
+	"unsafe"
+)
+
+const (
+	inputKeyboard = 1
+
+	keyeventfKeyUp    = 0x0002
+	keyeventfUnicode  = 0x0004
+	keyeventfScancode = 0x0008
+
+	vkTab     = 0x09
+	vkReturn  = 0x0D
+	vkShift   = 0x10
+	vkControl = 0x11
+	vkMenu    = 0x12
+	vkEscape  = 0x1B
+
+	mapvkVkToVsc = 0
+)
+
+var (
+	user32               = syscall.NewLazyDLL("user32.dll")
+	procSendInput        = user32.NewProc("SendInput")
+	procVkKeyScanW       = user32.NewProc("VkKeyScanW")
+	procMapVirtualKeyW   = user32.NewProc("MapVirtualKeyW")
+	procGetAsyncKeyState = user32.NewProc("GetAsyncKeyState")
+)
+
+// keybdInput matches Win32 KEYBDINPUT padded to union size (sizeof(MOUSEINPUT)):
+// 32 bytes on 64-bit Windows, 24 bytes on 32-bit Windows.
+type keybdInput struct {
+	wVk         uint16
+	wScan       uint16
+	dwFlags     uint32
+	time        uint32
+	dwExtraInfo uintptr
+	_pad        [8]byte
+}
+
+// winInput matches Win32 INPUT:
+// 40 bytes on 64-bit Windows, 28 bytes on 32-bit Windows.
+type winInput struct {
+	inputType uint32
+	ki        keybdInput
+}
+
+type windowsDriver struct{}
+
+// NewPlatformDriver creates the Windows native SendInput keyboard driver.
+func NewPlatformDriver() Driver {
+	return &windowsDriver{}
+}
+
+func (d *windowsDriver) CheckPermission(_ bool) error {
+	return nil
+}
+
+func (d *windowsDriver) Prepare(_ InputMode) error {
+	return nil
+}
+
+func (d *windowsDriver) Close() error {
+	return nil
+}
+
+func (d *windowsDriver) TypeRune(r rune, mode InputMode) error {
+	if mode == ModeHardware && r <= 0xFFFF {
+		if ok, err := d.typeRuneHardware(r); ok {
+			return err
+		}
+	}
+	return d.typeRuneUnicode(r)
+}
+
+func (d *windowsDriver) typeRuneUnicode(r rune) error {
+	units := utf16.Encode([]rune{r})
+	inputs := make([]winInput, 0, len(units)*2)
+	for _, u := range units {
+		inputs = append(inputs,
+			winInput{
+				inputType: inputKeyboard,
+				ki: keybdInput{
+					wVk:     0,
+					wScan:   u,
+					dwFlags: keyeventfUnicode,
+				},
+			},
+			winInput{
+				inputType: inputKeyboard,
+				ki: keybdInput{
+					wVk:     0,
+					wScan:   u,
+					dwFlags: keyeventfUnicode | keyeventfKeyUp,
+				},
+			},
+		)
+	}
+	return sendWinInputs(inputs)
+}
+
+func (d *windowsDriver) typeRuneHardware(r rune) (bool, error) {
+	ret, _, _ := procVkKeyScanW.Call(uintptr(uint16(r)))
+	packed := int16(ret)
+	if packed == -1 {
+		return false, nil
+	}
+
+	vk := uint16(packed & 0xFF)
+	shiftState := uint16((packed >> 8) & 0xFF)
+
+	var mods []uint16
+	if shiftState&1 != 0 {
+		mods = append(mods, vkShift)
+	}
+	if shiftState&2 != 0 {
+		mods = append(mods, vkControl)
+	}
+	if shiftState&4 != 0 {
+		mods = append(mods, vkMenu)
+	}
+
+	inputs := make([]winInput, 0, len(mods)*2+2)
+	for _, m := range mods {
+		inputs = append(inputs, makeVKInput(m, false))
+	}
+	inputs = append(inputs, makeVKInput(vk, false), makeVKInput(vk, true))
+	for i := len(mods) - 1; i >= 0; i-- {
+		inputs = append(inputs, makeVKInput(mods[i], true))
+	}
+	return true, sendWinInputs(inputs)
+}
+
+func (d *windowsDriver) PressEnter(shift bool) error {
+	if shift {
+		return sendWinInputs([]winInput{
+			makeVKInput(vkShift, false),
+			makeVKInput(vkReturn, false),
+			makeVKInput(vkReturn, true),
+			makeVKInput(vkShift, true),
+		})
+	}
+	return sendWinInputs([]winInput{
+		makeVKInput(vkReturn, false),
+		makeVKInput(vkReturn, true),
+	})
+}
+
+func (d *windowsDriver) PressTab() error {
+	return sendWinInputs([]winInput{
+		makeVKInput(vkTab, false),
+		makeVKInput(vkTab, true),
+	})
+}
+
+func (d *windowsDriver) IsEscapePressed() bool {
+	ret, _, _ := procGetAsyncKeyState.Call(uintptr(vkEscape))
+	return (uint16(ret) & 0x8000) != 0
+}
+
+func makeVKInput(vk uint16, keyUp bool) winInput {
+	scan, _, _ := procMapVirtualKeyW.Call(uintptr(vk), uintptr(mapvkVkToVsc))
+	var flags uint32
+	if keyUp {
+		flags |= keyeventfKeyUp
+	}
+	// Populate both wVk and wScan so applications listening to either virtual keys or scancodes work.
+	if scan != 0 && vk != vkShift && vk != vkControl && vk != vkMenu {
+		_ = keyeventfScancode
+	}
+	return winInput{
+		inputType: inputKeyboard,
+		ki: keybdInput{
+			wVk:     vk,
+			wScan:   uint16(scan),
+			dwFlags: flags,
+		},
+	}
+}
+
+func sendWinInputs(inputs []winInput) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	sent, _, err := procSendInput.Call(
+		uintptr(len(inputs)),
+		uintptr(unsafe.Pointer(&inputs[0])),
+		unsafe.Sizeof(inputs[0]),
+	)
+	if sent != uintptr(len(inputs)) {
+		if err != nil && err != syscall.Errno(0) {
+			return fmt.Errorf("Windows SendInput 调用失败 (%w)；若目标窗口以管理员运行，请以管理员身份运行本程序", err)
+		}
+		return fmt.Errorf("Windows SendInput 未能完整注入按键 (%d/%d)；若目标窗口以管理员运行，请以管理员身份运行本程序", sent, len(inputs))
+	}
+	return nil
+}
