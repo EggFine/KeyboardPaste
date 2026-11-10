@@ -86,7 +86,7 @@ type Options struct {
 	EnableEscStop         bool
 }
 
-// DefaultOptions returns defaults tuned for pasting code & text accurately.
+// DefaultOptions returns defaults tuned for pasting code into online editors & text boxes accurately.
 func DefaultOptions() Options {
 	return Options{
 		Delay:                 3 * time.Second,
@@ -94,10 +94,10 @@ func DefaultOptions() Options {
 		RandomJitter:          true,
 		Mode:                  ModeUnicode,
 		Newline:               NewlineEnter,
-		Indent:                IndentKeep,
+		Indent:                IndentResetAuto,
 		TabToSpaces:           4,
 		NormalizeCodeSpaces:   true,
-		ClearAutoCloseBracket: false,
+		ClearAutoCloseBracket: true,
 		EnableEscStop:         true,
 	}
 }
@@ -140,8 +140,9 @@ type Driver interface {
 	// ClearLineIndent clears any auto-indented whitespace before the cursor on the current line
 	// without deleting the preceding newline or text after the cursor.
 	ClearLineIndent(mode InputMode) error
-	// PressDelete sends Forward Delete (to remove an auto-completed closing bracket/quote to the right of the cursor).
-	PressDelete() error
+	// ClearLineRight safely clears any auto-completed closing symbols (e.g. }, ), ], ", ', */, `)
+	// to the right of the cursor on the current line ONLY, without ever deleting '\n' or lines below.
+	ClearLineRight(mode InputMode) error
 	// IsEscapePressed checks whether the physical ESC key is currently held down.
 	IsEscapePressed() bool
 }
@@ -407,10 +408,10 @@ startTyping:
 		default:
 			err = e.driver.TypeRune(r, opts.Mode)
 			if err == nil && opts.ClearAutoCloseBracket && isAutoClosableOpener(r) {
-				if sleepErr := e.sleepInterruptible(ctx, 12*time.Millisecond, opts.EnableEscStop, idx+1, totalRunes, emit); sleepErr != nil {
+				if sleepErr := e.sleepInterruptible(ctx, 10*time.Millisecond, opts.EnableEscStop, idx+1, totalRunes, emit); sleepErr != nil {
 					return sleepErr
 				}
-				err = e.driver.PressDelete()
+				err = e.driver.ClearLineRight(opts.Mode)
 			}
 		}
 
@@ -451,7 +452,7 @@ startTyping:
 
 func isAutoClosableOpener(r rune) bool {
 	switch r {
-	case '{', '[', '(', '"', '\'':
+	case '{', '[', '(', '"', '\'', '`', '*':
 		return true
 	default:
 		return false

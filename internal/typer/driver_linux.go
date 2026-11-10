@@ -348,20 +348,41 @@ func (d *linuxDriver) ClearLineIndent(mode InputMode) error {
 	return errors.New("Linux 键盘驱动尚未初始化")
 }
 
-func (d *linuxDriver) PressDelete() error {
+func (d *linuxDriver) ClearLineRight(mode InputMode) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	if err := d.typeRuneLocked(' ', mode); err != nil {
+		return err
+	}
+	time.Sleep(6 * time.Millisecond)
+
 	if d.x11 != nil {
-		if C.kp_x11_tap_keysym(d.x11, C.XK_Delete, 0, 1) != 0 {
-			return errors.New("X11 XTest 发送 Delete 键失败")
+		if C.kp_x11_tap_keysym(d.x11, C.XK_Left, 0, 1) != 0 {
+			return errors.New("X11 XTest 光标左移失败")
+		}
+		time.Sleep(6 * time.Millisecond)
+		if C.kp_x11_tap_keysym(d.x11, C.XK_End, 1, 1) != 0 {
+			return errors.New("X11 XTest 选择行尾补全符号失败")
+		}
+		time.Sleep(6 * time.Millisecond)
+		if C.kp_x11_tap_keysym(d.x11, C.XK_BackSpace, 0, 1) != 0 {
+			return errors.New("X11 XTest 清除行尾补全符号失败")
 		}
 		return nil
 	}
 
 	if d.wtypeBin != "" {
-		if err := exec.Command(d.wtypeBin, "-k", "Delete").Run(); err != nil {
-			return fmt.Errorf("wtype 发送 Delete 键失败: %w", err)
+		if err := exec.Command(d.wtypeBin, "-k", "Left").Run(); err != nil {
+			return fmt.Errorf("wtype 光标左移失败: %w", err)
+		}
+		time.Sleep(6 * time.Millisecond)
+		if err := exec.Command(d.wtypeBin, "-M", "shift", "-k", "End", "-m", "shift").Run(); err != nil {
+			return fmt.Errorf("wtype 选择行尾补全符号失败: %w", err)
+		}
+		time.Sleep(6 * time.Millisecond)
+		if err := exec.Command(d.wtypeBin, "-k", "BackSpace").Run(); err != nil {
+			return fmt.Errorf("wtype 清除行尾补全符号失败: %w", err)
 		}
 		return nil
 	}

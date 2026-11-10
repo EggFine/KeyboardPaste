@@ -69,10 +69,10 @@ func (m *mockDriver) ClearLineIndent(_ InputMode) error {
 	return nil
 }
 
-func (m *mockDriver) PressDelete() error {
+func (m *mockDriver) ClearLineRight(_ InputMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.events = append(m.events, "key:Delete")
+	m.events = append(m.events, "key:ClearLineRight")
 	return nil
 }
 
@@ -82,7 +82,11 @@ func (m *mockDriver) IsEscapePressed() bool {
 	return m.escAfter > 0 && m.typedCount >= m.escAfter
 }
 
-// smartEditorSim simulates an online IDE / Monaco / CodeMirror editor with auto-indent and auto-closing brackets!
+// smartEditorSim realistically models an online OJ / Monaco / CodeMirror / Ace editor:
+// - Auto-indents on Enter (+4 spaces after ':' or '{')
+// - Context-aware auto-closing quotes (only auto-closes opening quote, NOT closing quote or escaped \" or ' inside "")
+// - Auto-closes {}, (), [], “, and /* -> /**/
+// - Supports pre-existing template footer lines below the cursor!
 type smartEditorSim struct {
 	lines     []string
 	row       int
@@ -90,8 +94,11 @@ type smartEditorSim struct {
 	autoClose bool
 }
 
-func newSmartEditorSim(autoClose bool) *smartEditorSim {
-	return &smartEditorSim{lines: []string{""}, autoClose: autoClose}
+func newSmartEditorSim(autoClose bool, initialLines ...string) *smartEditorSim {
+	if len(initialLines) == 0 {
+		initialLines = []string{""}
+	}
+	return &smartEditorSim{lines: initialLines, autoClose: autoClose}
 }
 
 func (s *smartEditorSim) CheckPermission(_ bool) error { return nil }
@@ -106,17 +113,38 @@ func (s *smartEditorSim) TypeRune(r rune, _ InputMode) error {
 
 	inserted := string(r)
 	if s.autoClose {
-		switch r {
-		case '{':
-			inserted = "{}"
-		case '(':
-			inserted = "()"
-		case '[':
-			inserted = "[]"
-		case '"':
-			inserted = `""`
-		case '\'':
-			inserted = `''`
+		escaped := strings.HasSuffix(before, `\`)
+		inDoubleQuote := (strings.Count(before, `"`)-strings.Count(before, `\"`))%2 == 1
+		if !escaped {
+			switch r {
+			case '{':
+				if !inDoubleQuote {
+					inserted = "{}"
+				}
+			case '(':
+				if !inDoubleQuote {
+					inserted = "()"
+				}
+			case '[':
+				if !inDoubleQuote {
+					inserted = "[]"
+				}
+			case '"':
+				// Real Monaco/CodeMirror only auto-closes when NOT already inside an unclosed string!
+				if !inDoubleQuote {
+					inserted = `""`
+				}
+			case '\'':
+				if !inDoubleQuote && (len(before) == 0 || !isAlphaNum(rune(before[len(before)-1]))) {
+					inserted = `''`
+				}
+			case '`':
+				inserted = "``"
+			case '*':
+				if strings.HasSuffix(before, "/") {
+					inserted = "**/"
+				}
+			}
 		}
 	}
 	s.lines[s.row] = before + inserted + after
@@ -124,12 +152,15 @@ func (s *smartEditorSim) TypeRune(r rune, _ InputMode) error {
 	return nil
 }
 
+func isAlphaNum(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
+
 func (s *smartEditorSim) PressEnter(_ bool) error {
 	line := []rune(s.lines[s.row])
 	before := string(line[:s.col])
 	after := string(line[s.col:])
 
-	// Compute auto-indent like VS Code / Monaco: copy current leading spaces + 4 extra spaces if line ends with ':' or '{'.
 	indent := 0
 	for _, ch := range before {
 		if ch == ' ' {
@@ -156,18 +187,17 @@ func (s *smartEditorSim) PressTab() error {
 }
 
 func (s *smartEditorSim) ClearLineIndent(_ InputMode) error {
-	// Simulates sentinel space + Shift+Home + Backspace clearing everything before cursor on current line.
 	line := []rune(s.lines[s.row])
 	s.lines[s.row] = string(line[s.col:])
 	s.col = 0
 	return nil
 }
 
-func (s *smartEditorSim) PressDelete() error {
+func (s *smartEditorSim) ClearLineRight(_ InputMode) error {
+	// Sentinel ' ' + Left + Shift+End + Backspace wipes everything to the right of s.col on s.lines[s.row] ONLY,
+	// never touching s.lines[s.row+1:]!
 	line := []rune(s.lines[s.row])
-	if s.col < len(line) {
-		s.lines[s.row] = string(line[:s.col]) + string(line[s.col+1:])
-	}
+	s.lines[s.row] = string(line[:s.col])
 	return nil
 }
 
@@ -176,25 +206,25 @@ func (s *smartEditorSim) Text() string {
 }
 
 func TestPreprocessCodeSpacesTabsAndNewlines(t *testing.T) {
-	// Contains UTF-8 BOM, HTML &nbsp; (\u00A0), zero-width space (\u200B), CRLF, CR, LF, Tabs, mixed spaces+Tab, blank lines.
 	raw := "\uFEFFpackage main\r\n\r\nfunc add(a, b int) int {\r\t\u00A0\u200Breturn a + b\n  \t// aligned comment\n}"
 
-	got := PreprocessText(raw, DefaultOptions())
+	opts := DefaultOptions()
+	opts.Indent = IndentKeep
+	got := PreprocessText(raw, opts)
 	want := "package main\n\nfunc add(a, b int) int {\n     return a + b\n    // aligned comment\n}"
 	if got != want {
 		t.Fatalf("PreprocessText default =\n%q\nwant:\n%q", got, want)
 	}
 
-	// Keep raw Tab when TabToSpaces == 0
 	optsKeepTab := DefaultOptions()
 	optsKeepTab.TabToSpaces = 0
+	optsKeepTab.Indent = IndentKeep
 	gotKeepTab := PreprocessText("if true {\r\n\treturn\r\n}", optsKeepTab)
 	wantKeepTab := "if true {\n\treturn\n}"
 	if gotKeepTab != wantKeepTab {
 		t.Fatalf("PreprocessText keep tab = %q, want %q", gotKeepTab, wantKeepTab)
 	}
 
-	// Strip leading indent
 	optsStrip := DefaultOptions()
 	optsStrip.Indent = IndentStrip
 	gotStrip := PreprocessText("def f():\n    \treturn 1", optsStrip)
@@ -204,18 +234,18 @@ func TestPreprocessCodeSpacesTabsAndNewlines(t *testing.T) {
 	}
 }
 
-func TestSmartEditorPythonAndCIndentationExactMatch(t *testing.T) {
+func TestSmartEditorAutoCloseAndOJTemplateFooter(t *testing.T) {
+	// Test 1: Python with nested indents, dedents, strings, apostrophes ("don't"), and lists
 	pythonCode := strings.Join([]string{
 		"def solve(nums):",
+		"\t# don't modify input",
 		"\tif not nums:",
-		"\t\treturn 0",
+		"\t\treturn \"empty\"",
 		"\ttotal = 0",
 		"\tfor x in nums:",
 		"\t\tif x > 0:",
 		"\t\t\ttotal += x",
-		"\treturn total",
-		"",
-		"print(solve([1, -2, 3]))",
+		"\treturn f\"sum={total}\"",
 	}, "\r\n")
 
 	expectedPython := strings.ReplaceAll(strings.ReplaceAll(pythonCode, "\r\n", "\n"), "\t", "    ")
@@ -223,13 +253,10 @@ func TestSmartEditorPythonAndCIndentationExactMatch(t *testing.T) {
 	sim := newSmartEditorSim(true)
 	eng := NewEngine(sim)
 
-	opts := DefaultOptions()
+	opts := DefaultOptions() // Out-of-the-box defaults!
 	opts.Delay = 0
 	opts.CharInterval = 0
 	opts.RandomJitter = false
-	opts.TabToSpaces = 4
-	opts.Indent = IndentResetAuto
-	opts.ClearAutoCloseBracket = true
 
 	if err := eng.Run(context.Background(), pythonCode, opts, nil); err != nil {
 		t.Fatalf("Engine.Run python failed: %v", err)
@@ -238,14 +265,18 @@ func TestSmartEditorPythonAndCIndentationExactMatch(t *testing.T) {
 		t.Fatalf("Python code mismatch in smart editor!\ngot:\n%s\nwant:\n%s", sim.Text(), expectedPython)
 	}
 
-	cCode := "int main() {\n    if (a == 1) {\n        printf(\"hello world\\n\");\n    }\n    return 0;\n}"
-	simC := newSmartEditorSim(true)
-	engC := NewEngine(simC)
-	if err := engC.Run(context.Background(), cCode, opts, nil); err != nil {
-		t.Fatalf("Engine.Run C failed: %v", err)
+	// Test 2: C++ pasted inside an OJ template that ALREADY has closing footer lines below cursor!
+	// Includes /* block comment */, escaped quotes \"hi\", char literal 'x', arrays [], braces {}.
+	simOJ := newSmartEditorSim(true, "", "    }", "};")
+	engOJ := NewEngine(simOJ)
+
+	cppSnippet := "/* calc */\n        int arr[2] = {1, 2};\n        const char* s = \"say \\\"hi\\\" don't\";\n        char c = 'x';\n        return arr[0];"
+	if err := engOJ.Run(context.Background(), cppSnippet, opts, nil); err != nil {
+		t.Fatalf("Engine.Run C++ OJ template failed: %v", err)
 	}
-	if simC.Text() != cCode {
-		t.Fatalf("C code mismatch in smart editor!\ngot:\n%s\nwant:\n%s", simC.Text(), cCode)
+	wantOJ := cppSnippet + "\n    }\n};"
+	if simOJ.Text() != wantOJ {
+		t.Fatalf("C++ OJ template mismatch!\ngot:\n%s\nwant:\n%s", simOJ.Text(), wantOJ)
 	}
 }
 
@@ -258,6 +289,8 @@ func TestEngineRunUnicodeAndSpecialKeys(t *testing.T) {
 	opts.CharInterval = time.Millisecond
 	opts.RandomJitter = false
 	opts.TabToSpaces = 0
+	opts.Indent = IndentKeep
+	opts.ClearAutoCloseBracket = false
 	opts.Newline = NewlineShiftEnter
 
 	var phases []Phase

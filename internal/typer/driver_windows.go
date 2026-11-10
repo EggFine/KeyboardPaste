@@ -24,7 +24,9 @@ const (
 	vkControl = 0x11
 	vkMenu    = 0x12
 	vkEscape  = 0x1B
+	vkEnd     = 0x23
 	vkHome    = 0x24
+	vkLeft    = 0x25
 	vkDelete  = 0x2E
 
 	mapvkVkToVsc = 0
@@ -189,10 +191,36 @@ func (d *windowsDriver) ClearLineIndent(mode InputMode) error {
 	})
 }
 
-func (d *windowsDriver) PressDelete() error {
+func (d *windowsDriver) ClearLineRight(mode InputMode) error {
+	// 1. Insert one sentinel space, then move Left 1 char so >= 1 char (' ' + any auto-closed symbols) is strictly on this line before '\n'.
+	if err := d.TypeRune(' ', mode); err != nil {
+		return err
+	}
+	time.Sleep(6 * time.Millisecond)
+
+	if err := sendWinInputs([]winInput{
+		makeVKInput(vkLeft, false, true),
+		makeVKInput(vkLeft, true, true),
+	}); err != nil {
+		return err
+	}
+	time.Sleep(6 * time.Millisecond)
+
+	// 2. Shift + End (with EXTENDEDKEY) selects strictly to the end of the current line (never crossing '\n').
+	if err := sendWinInputs([]winInput{
+		makeVKInput(vkShift, false, false),
+		makeVKInput(vkEnd, false, true),
+		makeVKInput(vkEnd, true, true),
+		makeVKInput(vkShift, true, false),
+	}); err != nil {
+		return err
+	}
+	time.Sleep(6 * time.Millisecond)
+
+	// 3. Backspace removes the non-empty selection on this line, leaving '\n' and lines below 100% untouched.
 	return sendWinInputs([]winInput{
-		makeVKInput(vkDelete, false, true),
-		makeVKInput(vkDelete, true, true),
+		makeVKInput(vkBack, false, false),
+		makeVKInput(vkBack, true, false),
 	})
 }
 

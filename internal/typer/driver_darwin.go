@@ -135,12 +135,12 @@ import (
 )
 
 const (
-	macVKReturn        = 0x24
-	macVKTab           = 0x30
-	macVKSpace         = 0x31
-	macVKBackspace     = 0x33
-	macVKForwardDelete = 0x75
-	macVKLeftArrow     = 0x7B
+	macVKReturn     = 0x24
+	macVKTab        = 0x30
+	macVKSpace      = 0x31
+	macVKBackspace  = 0x33
+	macVKLeftArrow  = 0x7B
+	macVKRightArrow = 0x7C
 )
 
 type darwinDriver struct{}
@@ -234,9 +234,25 @@ func (d *darwinDriver) ClearLineIndent(mode InputMode) error {
 	return nil
 }
 
-func (d *darwinDriver) PressDelete() error {
-	if C.kp_post_virtual_key(C.CGKeyCode(macVKForwardDelete), 0, 0) != 0 {
-		return errors.New("macOS CGEvent 发送 Delete 键失败")
+func (d *darwinDriver) ClearLineRight(mode InputMode) error {
+	if err := d.TypeRune(' ', mode); err != nil {
+		return err
+	}
+	time.Sleep(6 * time.Millisecond)
+
+	if C.kp_post_virtual_key(C.CGKeyCode(macVKLeftArrow), 0, 0) != 0 {
+		return errors.New("macOS CGEvent 光标左移失败")
+	}
+	time.Sleep(6 * time.Millisecond)
+
+	// On macOS, Cmd + Shift + RightArrow selects from cursor to end of current line (before '\n').
+	if C.kp_post_virtual_key(C.CGKeyCode(macVKRightArrow), 1, 1) != 0 {
+		return errors.New("macOS CGEvent 选择行尾自动补全符号失败")
+	}
+	time.Sleep(6 * time.Millisecond)
+
+	if C.kp_post_virtual_key(C.CGKeyCode(macVKBackspace), 0, 0) != 0 {
+		return errors.New("macOS CGEvent 清除行尾自动补全符号失败")
 	}
 	return nil
 }

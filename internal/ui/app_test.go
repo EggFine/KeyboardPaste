@@ -38,7 +38,7 @@ func (s *stubDriver) PressTab() error {
 	return nil
 }
 func (s *stubDriver) ClearLineIndent(_ typer.InputMode) error { return nil }
-func (s *stubDriver) PressDelete() error                      { return nil }
+func (s *stubDriver) ClearLineRight(_ typer.InputMode) error  { return nil }
 func (s *stubDriver) IsEscapePressed() bool                   { return false }
 
 func TestHelpersParsing(t *testing.T) {

@@ -200,8 +200,8 @@ func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI
 	tabSelect := widget.NewSelect([]string{tabLabel4Spaces, tabLabel2Spaces, tabLabel8Spaces, tabLabelKeepTab}, nil)
 	tabSelect.SetSelected(tabLabel4Spaces)
 
-	indentSelect := widget.NewSelect([]string{indentLabelKeep, indentLabelResetAuto, indentLabelStrip}, nil)
-	indentSelect.SetSelected(indentLabelKeep)
+	indentSelect := widget.NewSelect([]string{indentLabelResetAuto, indentLabelKeep, indentLabelStrip}, nil)
+	indentSelect.SetSelected(indentLabelResetAuto)
 
 	selectGrid1 := container.NewGridWithColumns(2,
 		container.NewBorder(nil, nil, widget.NewLabel("输入模式:"), nil, modeSelect),
@@ -222,7 +222,7 @@ func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI
 	cleanSpaceCheck := widget.NewCheck("净化网页特殊空白（&nbsp; 转标准空格）", nil)
 	cleanSpaceCheck.SetChecked(defaults.NormalizeCodeSpaces)
 
-	autoBracketCheck := widget.NewCheck("消除编辑器自动补全右括号/引号", nil)
+	autoBracketCheck := widget.NewCheck("消除编辑器自动补全符号（{} [] () \"\" '' 等）", nil)
 	autoBracketCheck.SetChecked(defaults.ClearAutoCloseBracket)
 
 	checksGrid := container.NewGridWithColumns(2,
