@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -41,7 +42,7 @@ const (
 	// IndentKeep types every leading space/tab verbatim (ideal for plain textareas, Notepad, paste-mode terminals).
 	IndentKeep IndentMode = "keep"
 	// IndentResetAuto clears any editor auto-inserted spaces after Enter before typing exact line indentation
-	// (ideal for VS Code, Monaco, CodeMirror, LeetCode, NowCoder, PTA, and Python dedents).
+	// (ideal for VS Code, Monaco, CodeMirror, Ace, LeetCode, NowCoder, PTA, and Python dedents).
 	IndentResetAuto IndentMode = "reset_auto"
 	// IndentStrip removes leading spaces/tabs from each line and relies solely on the editor's auto-indent.
 	IndentStrip IndentMode = "strip"
@@ -137,6 +138,10 @@ type Driver interface {
 	PressEnter(shift bool) error
 	// PressTab sends the Tab key.
 	PressTab() error
+	// DismissAutocomplete safely closes any active Web code editor autocomplete popup
+	// before Enter is pressed (using Space + Backspace, never ESC which exits exam fullscreen),
+	// preventing Enter from accepting a completion suggestion instead of inserting a newline.
+	DismissAutocomplete(mode InputMode) error
 	// ClearLineIndent clears any auto-indented whitespace before the cursor on the current line
 	// without deleting the preceding newline or text after the cursor.
 	ClearLineIndent(mode InputMode) error
@@ -395,10 +400,21 @@ startTyping:
 		var err error
 		switch r {
 		case '\n':
-			err = e.driver.PressEnter(opts.Newline == NewlineShiftEnter)
+			if (indentMode == IndentResetAuto || opts.ClearAutoCloseBracket) && idx > 0 && shouldDismissAutocomplete(runes[idx-1]) {
+				err = e.driver.DismissAutocomplete(opts.Mode)
+				if err == nil {
+					if sleepErr := e.sleepInterruptible(ctx, 8*time.Millisecond, opts.EnableEscStop, idx, totalRunes, emit); sleepErr != nil {
+						return sleepErr
+					}
+				}
+			}
+			if err == nil {
+				err = e.driver.PressEnter(opts.Newline == NewlineShiftEnter)
+			}
 			if err == nil && indentMode == IndentResetAuto {
-				// Let the target code editor complete its Enter auto-indent before clearing line indent.
-				if sleepErr := e.sleepInterruptible(ctx, 15*time.Millisecond, opts.EnableEscStop, idx+1, totalRunes, emit); sleepErr != nil {
+				// Wait >1 browser animation frame (16.7ms @ 60Hz) so Web code editors (Monaco/CodeMirror/Ace)
+				// complete their Enter auto-indent before ClearLineIndent resets leading whitespace to column 0.
+				if sleepErr := e.sleepInterruptible(ctx, 22*time.Millisecond, opts.EnableEscStop, idx+1, totalRunes, emit); sleepErr != nil {
 					return sleepErr
 				}
 				err = e.driver.ClearLineIndent(opts.Mode)
@@ -457,6 +473,10 @@ func isAutoClosableOpener(r rune) bool {
 	default:
 		return false
 	}
+}
+
+func shouldDismissAutocomplete(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '$' || r == '.'
 }
 
 func (e *Engine) waitIfPausedOrAborted(
@@ -542,7 +562,7 @@ func computeCharInterval(r rune, opts Options) time.Duration {
 	base := opts.CharInterval
 	if base <= 0 {
 		if r == '\n' {
-			return 15 * time.Millisecond
+			return 18 * time.Millisecond
 		}
 		return 0
 	}
@@ -559,8 +579,8 @@ func computeCharInterval(r rune, opts Options) time.Duration {
 		}
 	}
 	// Ensure target editor finishes processing Enter before typing next line's leading spaces.
-	if r == '\n' && d < 15*time.Millisecond {
-		d = 15 * time.Millisecond
+	if r == '\n' && d < 18*time.Millisecond {
+		d = 18 * time.Millisecond
 	}
 	return d
 }

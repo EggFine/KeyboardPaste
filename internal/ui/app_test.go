@@ -37,9 +37,10 @@ func (s *stubDriver) PressTab() error {
 	s.typed = append(s.typed, '\t')
 	return nil
 }
-func (s *stubDriver) ClearLineIndent(_ typer.InputMode) error { return nil }
-func (s *stubDriver) ClearLineRight(_ typer.InputMode) error  { return nil }
-func (s *stubDriver) IsEscapePressed() bool                   { return false }
+func (s *stubDriver) DismissAutocomplete(_ typer.InputMode) error { return nil }
+func (s *stubDriver) ClearLineIndent(_ typer.InputMode) error     { return nil }
+func (s *stubDriver) ClearLineRight(_ typer.InputMode) error      { return nil }
+func (s *stubDriver) IsEscapePressed() bool                       { return false }
 
 func TestHelpersParsing(t *testing.T) {
 	if got := parseDelaySeconds("2.5", 3.0); got != 2.5 {

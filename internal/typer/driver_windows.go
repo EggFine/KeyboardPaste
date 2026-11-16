@@ -146,12 +146,7 @@ func (d *windowsDriver) typeRuneHardware(r rune) (bool, error) {
 
 func (d *windowsDriver) PressEnter(shift bool) error {
 	if shift {
-		return sendWinInputs([]winInput{
-			makeVKInput(vkShift, false, false),
-			makeVKInput(vkReturn, false, false),
-			makeVKInput(vkReturn, true, false),
-			makeVKInput(vkShift, true, false),
-		})
+		return sendShiftKeyTap(vkReturn, false)
 	}
 	return sendWinInputs([]winInput{
 		makeVKInput(vkReturn, false, false),
@@ -166,20 +161,34 @@ func (d *windowsDriver) PressTab() error {
 	})
 }
 
+func (d *windowsDriver) DismissAutocomplete(mode InputMode) error {
+	// Space + Backspace closes any active Monaco/CodeMirror/Ace autocomplete popup
+	// without pressing ESC (which exits fullscreen on online exam/OJ pages).
+	if err := d.TypeRune(' ', mode); err != nil {
+		return err
+	}
+	time.Sleep(6 * time.Millisecond)
+
+	if err := sendWinInputs([]winInput{
+		makeVKInput(vkBack, false, false),
+		makeVKInput(vkBack, true, false),
+	}); err != nil {
+		return err
+	}
+	time.Sleep(4 * time.Millisecond)
+	return nil
+}
+
 func (d *windowsDriver) ClearLineIndent(mode InputMode) error {
-	// 1. Insert one sentinel space so the current line always has >= 1 whitespace char before cursor.
+	// 1. Insert one sentinel space so the current line always has >= 1 whitespace char before cursor,
+	// placing cursor at the end of an all-whitespace line so Smart Home selects straight to column 0.
 	if err := d.TypeRune(' ', mode); err != nil {
 		return err
 	}
 	time.Sleep(8 * time.Millisecond)
 
 	// 2. Shift + Home (with EXTENDEDKEY so NumLock ON never turns Home into Numpad 7) selects all leading spaces on this line.
-	if err := sendWinInputs([]winInput{
-		makeVKInput(vkShift, false, false),
-		makeVKInput(vkHome, false, true),
-		makeVKInput(vkHome, true, true),
-		makeVKInput(vkShift, true, false),
-	}); err != nil {
+	if err := sendShiftKeyTap(vkHome, true); err != nil {
 		return err
 	}
 	time.Sleep(8 * time.Millisecond)
@@ -207,12 +216,7 @@ func (d *windowsDriver) ClearLineRight(mode InputMode) error {
 	time.Sleep(6 * time.Millisecond)
 
 	// 2. Shift + End (with EXTENDEDKEY) selects strictly to the end of the current line (never crossing '\n').
-	if err := sendWinInputs([]winInput{
-		makeVKInput(vkShift, false, false),
-		makeVKInput(vkEnd, false, true),
-		makeVKInput(vkEnd, true, true),
-		makeVKInput(vkShift, true, false),
-	}); err != nil {
+	if err := sendShiftKeyTap(vkEnd, true); err != nil {
 		return err
 	}
 	time.Sleep(6 * time.Millisecond)
@@ -222,6 +226,22 @@ func (d *windowsDriver) ClearLineRight(mode InputMode) error {
 		makeVKInput(vkBack, false, false),
 		makeVKInput(vkBack, true, false),
 	})
+}
+
+func sendShiftKeyTap(vk uint16, extended bool) error {
+	if err := sendWinInputs([]winInput{makeVKInput(vkShift, false, false)}); err != nil {
+		return err
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := sendWinInputs([]winInput{
+		makeVKInput(vk, false, extended),
+		makeVKInput(vk, true, extended),
+	}); err != nil {
+		_ = sendWinInputs([]winInput{makeVKInput(vkShift, true, false)})
+		return err
+	}
+	time.Sleep(2 * time.Millisecond)
+	return sendWinInputs([]winInput{makeVKInput(vkShift, true, false)})
 }
 
 func (d *windowsDriver) IsEscapePressed() bool {

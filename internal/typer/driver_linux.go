@@ -113,10 +113,14 @@ static int kp_x11_tap_keysym(kp_x11_ctx *ctx, KeySym sym, int with_shift, int pr
 				int need_shift = (matched_level == 1) || with_shift;
 				if (need_shift && shift_kc != 0) {
 					XTestFakeKeyEvent(dpy, shift_kc, True, CurrentTime);
+					XSync(dpy, False);
+					usleep(1500);
 				}
 				XTestFakeKeyEvent(dpy, kc, True, CurrentTime);
 				XTestFakeKeyEvent(dpy, kc, False, CurrentTime);
 				if (need_shift && shift_kc != 0) {
+					XSync(dpy, False);
+					usleep(1500);
 					XTestFakeKeyEvent(dpy, shift_kc, False, CurrentTime);
 				}
 				XSync(dpy, False);
@@ -133,10 +137,14 @@ static int kp_x11_tap_keysym(kp_x11_ctx *ctx, KeySym sym, int with_shift, int pr
 
 	if (with_shift && shift_kc != 0) {
 		XTestFakeKeyEvent(dpy, shift_kc, True, CurrentTime);
+		XSync(dpy, False);
+		usleep(1500);
 	}
 	XTestFakeKeyEvent(dpy, (KeyCode)ctx->scratch_kc, True, CurrentTime);
 	XTestFakeKeyEvent(dpy, (KeyCode)ctx->scratch_kc, False, CurrentTime);
 	if (with_shift && shift_kc != 0) {
+		XSync(dpy, False);
+		usleep(1500);
 		XTestFakeKeyEvent(dpy, shift_kc, False, CurrentTime);
 	}
 	XSync(dpy, False);
@@ -308,6 +316,34 @@ func (d *linuxDriver) PressTab() error {
 		if err := exec.Command(d.wtypeBin, "-k", "Tab").Run(); err != nil {
 			return fmt.Errorf("wtype 发送 Tab 键失败: %w", err)
 		}
+		return nil
+	}
+
+	return errors.New("Linux 键盘驱动尚未初始化")
+}
+
+func (d *linuxDriver) DismissAutocomplete(mode InputMode) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err := d.typeRuneLocked(' ', mode); err != nil {
+		return err
+	}
+	time.Sleep(6 * time.Millisecond)
+
+	if d.x11 != nil {
+		if C.kp_x11_tap_keysym(d.x11, C.XK_BackSpace, 0, 1) != 0 {
+			return errors.New("X11 XTest 关闭自动补全弹窗失败")
+		}
+		time.Sleep(4 * time.Millisecond)
+		return nil
+	}
+
+	if d.wtypeBin != "" {
+		if err := exec.Command(d.wtypeBin, "-k", "BackSpace").Run(); err != nil {
+			return fmt.Errorf("wtype 关闭自动补全弹窗失败: %w", err)
+		}
+		time.Sleep(4 * time.Millisecond)
 		return nil
 	}
 

@@ -216,6 +216,19 @@ func (d *darwinDriver) PressTab() error {
 	return nil
 }
 
+func (d *darwinDriver) DismissAutocomplete(mode InputMode) error {
+	if err := d.TypeRune(' ', mode); err != nil {
+		return err
+	}
+	time.Sleep(6 * time.Millisecond)
+
+	if C.kp_post_virtual_key(C.CGKeyCode(macVKBackspace), 0, 0) != 0 {
+		return errors.New("macOS CGEvent 关闭自动补全弹窗失败")
+	}
+	time.Sleep(4 * time.Millisecond)
+	return nil
+}
+
 func (d *darwinDriver) ClearLineIndent(mode InputMode) error {
 	if err := d.TypeRune(' ', mode); err != nil {
 		return err

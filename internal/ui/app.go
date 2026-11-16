@@ -79,7 +79,7 @@ func buildMainUI(fyneApp fyne.App, win fyne.Window, engine *typer.Engine) *appUI
 	editor := widget.NewMultiLineEntry()
 	editor.Wrapping = fyne.TextWrapBreak
 	editor.TextStyle = fyne.TextStyle{Monospace: true}
-	editor.SetPlaceHolder("在此粘贴需要模拟键盘输入的代码或文本...\n\n代码粘贴小贴士：\n• 默认自动将 Tab 缩进对齐转换为 4 个空格，并净化网页复制的特殊空白符 (&nbsp;)\n• 若目标是在线 OJ / VS Code 等会自动缩进的代码编辑器，建议将下方「行首缩进」切换为「清除自动缩进后重打」，完美还原多级缩进与 Python 退格缩进")
+	editor.SetPlaceHolder("在此粘贴需要模拟键盘输入的代码或文本...\n\n代码粘贴小贴士（默认开箱适配 Web 代码编辑器）：\n• 默认自动将 Tab 缩进对齐转换为 4 个空格，并净化网页复制的特殊空白符 (&nbsp;)\n• 默认开启「清除自动缩进后重打」与「消除自动补全符号」，完美适配在线 OJ / LeetCode / 牛客 / PTA / VS Code Web 等换行自动缩进、自动补括号与代码提示弹窗")
 
 	statsLabel := widget.NewLabel("0 字符 · 0 行 · 预计 ~0.0s")
 

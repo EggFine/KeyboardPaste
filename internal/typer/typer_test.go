@@ -62,6 +62,13 @@ func (m *mockDriver) PressTab() error {
 	return nil
 }
 
+func (m *mockDriver) DismissAutocomplete(_ InputMode) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, "key:DismissAutocomplete")
+	return nil
+}
+
 func (m *mockDriver) ClearLineIndent(_ InputMode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -82,16 +89,18 @@ func (m *mockDriver) IsEscapePressed() bool {
 	return m.escAfter > 0 && m.typedCount >= m.escAfter
 }
 
-// smartEditorSim realistically models an online OJ / Monaco / CodeMirror / Ace editor:
-// - Auto-indents on Enter (+4 spaces after ':' or '{')
-// - Context-aware auto-closing quotes (only auto-closes opening quote, NOT closing quote or escaped \" or ' inside "")
-// - Auto-closes {}, (), [], “, and /* -> /**/
-// - Supports pre-existing template footer lines below the cursor!
+// smartEditorSim realistically models an online Web code editor (Monaco / CodeMirror 5 & 6 / Ace):
+// - Auto-indents on Enter (carries current line indent + adds 4 spaces after ':', '{', '(', '[', and splits '{|}' if unclosed)
+// - Implements real Smart Home (Shift+Home) selection toggling between firstNonWhitespace and column 0
+// - Implements active Autocomplete Popup on identifiers/properties that hijacks Enter if not dismissed first!
+// - Context-aware auto-closing brackets & quotes ({}, (), [], "", ”, “, /**/)
+// - Supports pre-existing OJ template footer lines below the cursor!
 type smartEditorSim struct {
 	lines     []string
 	row       int
 	col       int
 	autoClose bool
+	popupOpen bool
 }
 
 func newSmartEditorSim(autoClose bool, initialLines ...string) *smartEditorSim {
@@ -149,6 +158,13 @@ func (s *smartEditorSim) TypeRune(r rune, _ InputMode) error {
 	}
 	s.lines[s.row] = before + inserted + after
 	s.col++
+
+	// Simulate Web code editor autocomplete popup opening on identifier/member typing and closing on space/punctuation.
+	if shouldDismissAutocomplete(r) {
+		s.popupOpen = true
+	} else {
+		s.popupOpen = false
+	}
 	return nil
 }
 
@@ -156,7 +172,41 @@ func isAlphaNum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
 
+func (s *smartEditorSim) backspaceOne() {
+	if s.col > 0 {
+		line := []rune(s.lines[s.row])
+		s.lines[s.row] = string(line[:s.col-1]) + string(line[s.col:])
+		s.col--
+	} else if s.row > 0 {
+		prev := []rune(s.lines[s.row-1])
+		cur := s.lines[s.row]
+		s.lines[s.row-1] = string(prev) + cur
+		s.lines = append(s.lines[:s.row], s.lines[s.row+1:]...)
+		s.row--
+		s.col = len(prev)
+	}
+	// Backspace when popup is already closed does NOT reopen popup in Monaco/CodeMirror/Ace.
+}
+
+func (s *smartEditorSim) DismissAutocomplete(mode InputMode) error {
+	if err := s.TypeRune(' ', mode); err != nil {
+		return err
+	}
+	s.backspaceOne()
+	return nil
+}
+
 func (s *smartEditorSim) PressEnter(_ bool) error {
+	// If autocomplete popup is still open when Enter is pressed, real Monaco/CodeMirror/Ace accepts the highlighted completion instead of inserting a newline!
+	if s.popupOpen {
+		line := []rune(s.lines[s.row])
+		hijack := "_AUTOCOMPLETE_HIJACKED"
+		s.lines[s.row] = string(line[:s.col]) + hijack + string(line[s.col:])
+		s.col += len([]rune(hijack))
+		s.popupOpen = false
+		return nil
+	}
+
 	line := []rune(s.lines[s.row])
 	before := string(line[:s.col])
 	after := string(line[s.col:])
@@ -170,7 +220,21 @@ func (s *smartEditorSim) PressEnter(_ bool) error {
 		}
 	}
 	trimmed := strings.TrimRight(before, " ")
-	if strings.HasSuffix(trimmed, ":") || strings.HasSuffix(trimmed, "{") {
+	extraIndent := strings.HasSuffix(trimmed, ":") || strings.HasSuffix(trimmed, "{") || strings.HasSuffix(trimmed, "(") || strings.HasSuffix(trimmed, "[")
+
+	// Simulate auto-brace-splitting when pressing Enter between '{|}'
+	if strings.HasSuffix(trimmed, "{") && strings.HasPrefix(strings.TrimLeft(after, " "), "}") {
+		s.lines[s.row] = before
+		midLine := strings.Repeat(" ", indent+4)
+		closeLine := strings.Repeat(" ", indent) + strings.TrimLeft(after, " ")
+		tail := append([]string{midLine, closeLine}, s.lines[s.row+1:]...)
+		s.lines = append(s.lines[:s.row+1], tail...)
+		s.row++
+		s.col = indent + 4
+		return nil
+	}
+
+	if extraIndent {
 		indent += 4
 	}
 
@@ -186,17 +250,49 @@ func (s *smartEditorSim) PressTab() error {
 	return s.TypeRune('\t', ModeUnicode)
 }
 
-func (s *smartEditorSim) ClearLineIndent(_ InputMode) error {
+func (s *smartEditorSim) ClearLineIndent(mode InputMode) error {
+	// Faithfully execute the exact driver keystrokes against Web IDE Smart Home:
+	// 1. Type sentinel ' '
+	if err := s.TypeRune(' ', mode); err != nil {
+		return err
+	}
+	// 2. Single Shift+Home using CodeMirror 6 / Monaco / Ace Smart Home target calculation:
 	line := []rune(s.lines[s.row])
-	s.lines[s.row] = string(line[s.col:])
-	s.col = 0
+	firstNonWS := len(line)
+	for i, ch := range line {
+		if ch != ' ' && ch != '\t' {
+			firstNonWS = i
+			break
+		}
+	}
+	targetCol := 0
+	if s.col != firstNonWS {
+		targetCol = firstNonWS
+	}
+	// 3. Backspace deletes selection [min(targetCol, s.col) : max(targetCol, s.col)] (or 1 char if empty selection!)
+	selStart, selEnd := targetCol, s.col
+	if selStart > selEnd {
+		selStart, selEnd = selEnd, selStart
+	}
+	if selStart == selEnd {
+		s.backspaceOne()
+	} else {
+		s.lines[s.row] = string(line[:selStart]) + string(line[selEnd:])
+		s.col = selStart
+	}
 	return nil
 }
 
-func (s *smartEditorSim) ClearLineRight(_ InputMode) error {
-	// Sentinel ' ' + Left + Shift+End + Backspace wipes everything to the right of s.col on s.lines[s.row] ONLY,
-	// never touching s.lines[s.row+1:]!
+func (s *smartEditorSim) ClearLineRight(mode InputMode) error {
+	// Faithfully execute sentinel ' ' + Left + Shift+End + Backspace on s.lines[s.row] ONLY:
+	if err := s.TypeRune(' ', mode); err != nil {
+		return err
+	}
+	if s.col > 0 {
+		s.col-- // Left arrow
+	}
 	line := []rune(s.lines[s.row])
+	// Shift+End selects [s.col : len(line)]; since sentinel ' ' is to the right, len(line) > s.col is ALWAYS non-empty!
 	s.lines[s.row] = string(line[:s.col])
 	return nil
 }
@@ -235,17 +331,19 @@ func TestPreprocessCodeSpacesTabsAndNewlines(t *testing.T) {
 }
 
 func TestSmartEditorAutoCloseAndOJTemplateFooter(t *testing.T) {
-	// Test 1: Python with nested indents, dedents, strings, apostrophes ("don't"), and lists
+	// Test 1: Python with nested indents, multi-level dedents, blank lines, identifiers before newline (autocomplete), strings, apostrophes ("don't"), and lists
 	pythonCode := strings.Join([]string{
-		"def solve(nums):",
+		"def solve(nums, target):",
 		"\t# don't modify input",
-		"\tif not nums:",
-		"\t\treturn \"empty\"",
-		"\ttotal = 0",
-		"\tfor x in nums:",
-		"\t\tif x > 0:",
-		"\t\t\ttotal += x",
-		"\treturn f\"sum={total}\"",
+		"\tseen = {}",
+		"\tfor i, num in enumerate(nums):",
+		"\t\tdiff = target - num",
+		"\t\tif diff in seen:",
+		"\t\t\tres = [seen[diff], i]",
+		"\t\t\treturn res",
+		"\t\tseen[num] = i",
+		"",
+		"\treturn []",
 	}, "\r\n")
 
 	expectedPython := strings.ReplaceAll(strings.ReplaceAll(pythonCode, "\r\n", "\n"), "\t", "    ")
@@ -262,15 +360,24 @@ func TestSmartEditorAutoCloseAndOJTemplateFooter(t *testing.T) {
 		t.Fatalf("Engine.Run python failed: %v", err)
 	}
 	if sim.Text() != expectedPython {
-		t.Fatalf("Python code mismatch in smart editor!\ngot:\n%s\nwant:\n%s", sim.Text(), expectedPython)
+		t.Fatalf("Python code mismatch in smart Web editor!\ngot:\n%s\nwant:\n%s", sim.Text(), expectedPython)
 	}
 
 	// Test 2: C++ pasted inside an OJ template that ALREADY has closing footer lines below cursor!
-	// Includes /* block comment */, escaped quotes \"hi\", char literal 'x', arrays [], braces {}.
+	// Includes /* block comment */, multi-line nested braces, escaped quotes \"hi\", char literal 'x', arrays [], identifiers at EOL.
 	simOJ := newSmartEditorSim(true, "", "    }", "};")
 	engOJ := NewEngine(simOJ)
 
-	cppSnippet := "/* calc */\n        int arr[2] = {1, 2};\n        const char* s = \"say \\\"hi\\\" don't\";\n        char c = 'x';\n        return arr[0];"
+	cppSnippet := strings.Join([]string{
+		"/* calc */",
+		"        int arr[2] = {1, 2};",
+		"        if (arr[0] > 0) {",
+		"            arr[1] = arr[0] + 1;",
+		"        }",
+		"        const char* s = \"say \\\"hi\\\" don't\";",
+		"        char c = 'x';",
+		"        return arr[1];",
+	}, "\n")
 	if err := engOJ.Run(context.Background(), cppSnippet, opts, nil); err != nil {
 		t.Fatalf("Engine.Run C++ OJ template failed: %v", err)
 	}
